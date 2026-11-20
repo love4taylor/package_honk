@@ -1,0 +1,26 @@
+# Editors and operating systems
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Local source checkouts and build tools
+/src/
+/.codegraph/
+/.ccwrap/
+/.doona/
+/.doona-lite/
+/target/
+
+# OpenWrt downloads and build output
+/dl/
+/build_dir/
+/staging_dir/
+/bin/
+/logs/
+/tmp/
+*.apk
+*.ipk

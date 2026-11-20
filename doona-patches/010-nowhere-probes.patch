@@ -1,0 +1,21 @@
+--- a/src/dae/probes.ts
++++ b/src/dae/probes.ts
+@@ -12,6 +12,8 @@
+   hysteria2: {connect: false, stream: true, udp: true},
+   tuic: {connect: false, stream: true, udp: true},
+   juicity: {connect: false, stream: true, udp: true},
++  // Doona's catalog does not distinguish a Nowhere TCP carrier from QUIC.
++  nowhere: {connect: false, stream: true, udp: true},
+   direct: {connect: false, stream: true, udp: true},
+   block: {connect: false, stream: false, udp: false}
+ };
+--- a/src/dae/probes.test.ts
++++ b/src/dae/probes.test.ts
+@@ -12,6 +12,7 @@
+   ['hysteria2', false, true, true],
+   ['tuic', false, true, true],
+   ['juicity', false, true, true],
++  ['nowhere', false, true, true],
+   ['direct', false, true, true],
+   ['block', false, false, false],
+   ['unknown', false, false, false],

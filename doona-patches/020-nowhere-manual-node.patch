@@ -1,0 +1,439 @@
+--- a/src/api/engines/honk.ts
++++ b/src/api/engines/honk.ts
+@@ -155,7 +155,7 @@
+ 
+ export const honk: Engine = {
+   id: 'honk',
+-  nodeLinkSchemes: ['socks5', 'socks4', 'socks4a', 'ss', 'trojan', 'anytls', 'vmess', 'vless', 'hysteria2', 'hysteria', 'hy2', 'tuic', 'juicity'],
++  nodeLinkSchemes: ['socks5', 'socks4', 'socks4a', 'ss', 'trojan', 'anytls', 'vmess', 'vless', 'hysteria2', 'hysteria', 'hy2', 'tuic', 'juicity', 'nowhere'],
+   flowDemandGraceSeconds: 60,
+   globalSettings: honkGlobal,
+   restartOnly: honkRestartOnly,
+--- a/src/api/engines/index.test.ts
++++ b/src/api/engines/index.test.ts
+@@ -212,7 +212,7 @@
+ it('limits known honk share-link schemes without guessing for other engines', () => {
+   // The schemes honk's share-link parser names in its unknown-protocol error.
+   expect(new Set(honk.nodeLinkSchemes)).toEqual(
+-    new Set(['socks5', 'socks4', 'socks4a', 'ss', 'trojan', 'anytls', 'vmess', 'vless', 'hysteria2', 'hysteria', 'hy2', 'tuic', 'juicity'])
++    new Set(['socks5', 'socks4', 'socks4a', 'ss', 'trojan', 'anytls', 'vmess', 'vless', 'hysteria2', 'hysteria', 'hy2', 'tuic', 'juicity', 'nowhere'])
+   );
+   expect(honk.nodeLinkSchemes).not.toContain('garbage');
+   expect(other.nodeLinkSchemes).toBeNull();
+--- a/src/dae/nodeForm.ts
++++ b/src/dae/nodeForm.ts
+@@ -1,7 +1,7 @@
+-export const protocols = ['vmess', 'vless', 'hysteria2', 'ss', 'trojan', 'tuic', 'anytls', 'socks5', 'juicity'] as const;
++export const protocols = ['vmess', 'vless', 'hysteria2', 'ss', 'trojan', 'tuic', 'anytls', 'socks5', 'juicity', 'nowhere'] as const;
+ export type Protocol = (typeof protocols)[number];
+ export const isProtocol = (value: string): value is Protocol => (protocols as readonly string[]).includes(value);
+-const protocolNames: Partial<Record<Protocol, string>> = {ss: 'Shadowsocks', hysteria2: 'Hysteria2', anytls: 'AnyTLS', juicity: 'Juicity'};
++const protocolNames: Partial<Record<Protocol, string>> = {ss: 'Shadowsocks', hysteria2: 'Hysteria2', anytls: 'AnyTLS', juicity: 'Juicity', nowhere: 'Nowhere'};
+ export const protocolName = (protocol: Protocol) => protocolNames[protocol] ?? protocol.toUpperCase();
+ export type NodeFields = Record<string, string> & {protocol: Protocol; host: string; port: string; username: string; password: string; name: string};
+ export type NodeDocument = {original: string; initial: NodeFields; query: string; json?: Record<string, unknown>; tail: string};
+@@ -16,11 +16,14 @@
+     username: '',
+     password: '',
+     name: '',
+-    security: ['vless', 'trojan', 'anytls'].includes(protocol) ? 'tls' : 'none',
++    security: ['vless', 'trojan', 'anytls', 'nowhere'].includes(protocol) ? 'tls' : 'none',
+     type: 'tcp',
+-    method: protocol === 'vmess' ? 'auto' : 'aes-128-gcm'
++    method: protocol === 'vmess' ? 'auto' : 'aes-128-gcm',
++    ...(protocol === 'nowhere' ? {nowhereKey: '', ...nowhereDefaults} : {})
+   };
+ }
++const nowhereDefaults = {net: 'tcp', morph: '1', sni: '', pin: ''};
++const nowhereParams = (query: string) => new URLSearchParams(query.replaceAll('+', '%2B'));
+ const aliases: Record<string, string[]> = {
+   sni: ['sni', 'peer'],
+   'plugin-opts': ['plugin-opts', 'plugin_opts'],
+@@ -56,8 +59,11 @@
+   if (!protocols.includes(protocol as Protocol)) throw new Error('Unsupported protocol');
+   const fields = emptyNode(protocol as Protocol);
+   let body = first.slice(first.indexOf('://') + 3);
+-  const hash = body.lastIndexOf('#');
+-  fields.name = hash < 0 ? '' : new URLSearchParams('name=' + body.slice(hash + 1).replaceAll('+', '%2B')).get('name')!;
++  const hash = protocol === 'nowhere' ? body.indexOf('#') : body.lastIndexOf('#');
++  if (hash >= 0) {
++    const fragment = body.slice(hash + 1);
++    fields.name = protocol === 'nowhere' ? decodeURIComponent(fragment) : new URLSearchParams('name=' + fragment.replaceAll('+', '%2B')).get('name')!;
++  }
+   if (hash >= 0) body = body.slice(0, hash);
+   const q = body.indexOf('?');
+   const query = q < 0 ? '' : body.slice(q + 1);
+@@ -91,7 +97,17 @@
+     rawCredentials = protocol === 'ss';
+     encodedAuthority = true;
+   }
+-  if (!json) {
++  if (protocol === 'nowhere') {
++    const url = new URL(first);
++    fields.nowhereKey = decodeURIComponent(url.username);
++    fields.host = url.hostname.replace(/^\[|\]$/g, '');
++    fields.port = url.port;
++    const params = nowhereParams(query);
++    for (const [key, fallback] of Object.entries(nowhereDefaults)) {
++      const value = params.get(key) ?? fallback;
++      fields[key] = (key === 'sni' || key === 'pin') && value === 'none' ? '' : value;
++    }
++  } else if (!json) {
+     const at = authority.lastIndexOf('@');
+     const endpoint = authority.slice(at + 1).split('/')[0];
+     let credentials = at < 0 ? '' : authority.slice(0, at);
+@@ -188,6 +204,18 @@
+ export function nodeLink(fields: NodeFields, document?: NodeDocument): string {
+   if (document && JSON.stringify(fields) === JSON.stringify(document.initial)) return document.original;
+   const same = document?.initial.protocol === fields.protocol;
++  if (fields.protocol === 'nowhere') {
++    const params = nowhereParams(same ? document.query : '');
++    for (const [key, fallback] of Object.entries(nowhereDefaults)) {
++      if (same && document.initial[key] === fields[key]) continue;
++      params.delete(key);
++      if (fields[key] && fields[key] !== fallback) params.set(key, fields[key]);
++    }
++    const host = fields.host.includes(':') ? `[${fields.host.replace(/^\[|\]$/g, '')}]` : fields.host;
++    const name = encodeURIComponent(fields.name);
++    const query = params.toString().replaceAll('+', '%20');
++    return `nowhere://${fields.nowhereKey}@${host}:${fields.port}${query ? `?${query}` : ''}${name ? `#${name}` : ''}${same ? document.tail : ''}`;
++  }
+   if (fields.protocol === 'vmess' && document?.json && same) {
+     const json: Record<string, unknown> = same && document?.json ? {...document.json} : {v: '2', aid: '0'};
+     for (const [key, target] of Object.entries(jsonKeys)) {
+@@ -240,7 +268,7 @@
+   return `${fields.protocol}://${authority}${params.size ? `?${params}` : ''}${fields.name ? `#${enc(fields.name)}` : ''}${same ? (document?.tail ?? '') : ''}`;
+ }
+ // `flag` is the value a ticked checkbox writes; `range` bounds a whole number.
+-export type ManualField = {key: string; options?: string[]; flag?: string; required?: boolean; range?: [number, number]};
++export type ManualField = {key: string; options?: string[]; flag?: string; off?: string; required?: boolean; range?: [number, number]};
+ const uuidProtocols = ['vmess', 'vless', 'tuic', 'juicity'];
+ const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+ export const shadowsocksMethods = [
+@@ -272,6 +300,9 @@
+ // cipher, security, TLS, transport and protocol options apply to this protocol and choice. Lite's form reads the same lists.
+ export function manualFields(f: NodeFields): ManualField[] {
+   const p = f.protocol;
++  if (p === 'nowhere') {
++    return [{key: 'nowhereKey', required: true}, {key: 'net', options: ['tcp', 'udp']}, {key: 'morph', flag: '1', off: '0'}, {key: 'sni'}];
++  }
+   const fields: ManualField[] = [];
+   const add = (key: string, more: Omit<ManualField, 'key'> = {}) => fields.push({key, ...more});
+   if (['vmess', 'vless', 'tuic', 'juicity', 'socks5'].includes(p)) add('username', {required: p !== 'socks5'});
+@@ -311,6 +342,7 @@
+ // reads it: ALPN for TUIC and XHTTP, the QUIC and AnyTLS tuning for their own protocols, and the mux controls for VLESS.
+ export function advancedFields(f: NodeFields): ManualField[] {
+   const p = f.protocol;
++  if (p === 'nowhere') return [{key: 'pin'}];
+   const fields: ManualField[] = [];
+   const add = (key: string, more: Omit<ManualField, 'key'> = {}) => fields.push({key, ...more});
+   const count = (key: string, range: [number, number] = [0, Number.MAX_SAFE_INTEGER], required = false) => add(key, {range, required});
+@@ -388,9 +420,33 @@
+   if (key === 'alpn') return f.type === 'xhttp' && value.split(',').some(item => item.trim() && item.trim() !== 'h2');
+   return key === 'mport' && !hopsValid(value);
+ }
++const nowhereDomain = (host: string) => host.length <= 253 && host.split('.').every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label));
++
++function nowhereHost(host: string) {
++  try {
++    if (!host.includes(':')) return nowhereDomain(host) && Boolean(new URL(`https://${host}`).hostname);
++    const address = host.replace(/^\[(.*)\]$/, '$1');
++    if (!/^[a-f\d:.]+$/i.test(address)) return false;
++    return new URL(`nowhere://[${address}]`).hostname.startsWith('[');
++  } catch {
++    return false;
++  }
++}
++
+ // The keys of the server address, port and shown fields that are missing or malformed; the name is the caller's.
+ export function manualInvalid(f: NodeFields): string[] {
+   const port = Number(f.port);
++  if (f.protocol === 'nowhere') {
++    return [
++      ...(nowhereHost(f.host) ? [] : ['host']),
++      ...(/^\d+$/.test(f.port) && port >= 1 && port <= 65535 ? [] : ['port']),
++      ...(/^[a-f0-9]{32}$/.test(f.nowhereKey) ? [] : ['nowhereKey']),
++      ...(['tcp', 'udp'].includes(f.net) ? [] : ['net']),
++      ...(['0', '1'].includes(f.morph) ? [] : ['morph']),
++      ...(!f.sni || nowhereDomain(f.sni) ? [] : ['sni']),
++      ...(!f.pin || /^[a-f0-9]{64}$/.test(f.pin) ? [] : ['pin'])
++    ];
++  }
+   return [
+     ...(/^[^\s/?#@\\]+$/.test(f.host) ? [] : ['host']),
+     ...(Number.isInteger(port) && port >= 1 && port <= 65535 ? [] : ['port']),
+--- a/src/dae/nodeForm.test.ts
++++ b/src/dae/nodeForm.test.ts
+@@ -2,6 +2,7 @@
+ import {advancedFields, emptyNode, manualFields, manualInvalid, manualLink, nodeLink, parseNodeLink, protocols, settle, type Protocol} from './nodeForm';
+ 
+ const uuid = 'b831381d-6324-4d53-ad4f-8cda48b30811';
++const nowhereKey = '0123456789abcdef'.repeat(2);
+ const node = (protocol: Protocol, over: Record<string, string>) => ({...emptyNode(protocol), host: 'example.com', name: 'hk-01', ...over});
+ 
+ // The links honk's share-link parser reads: each row is a form state and the exact link it produces.
+@@ -137,7 +138,8 @@
+     {password: 'pw', min_idle_session: '5', idle_session_check_interval: '30', idle_session_timeout: '60'},
+     'anytls://pw@example.com:443?min_idle_session=5&idle_session_check_interval=30&idle_session_timeout=60#hk-01'
+   ],
+-  ['juicity mtu', 'juicity', {username: uuid, password: 'pw', mtu: '1350'}, `juicity://${uuid}:pw@example.com:443?mtu=1350#hk-01`]
++  ['juicity mtu', 'juicity', {username: uuid, password: 'pw', mtu: '1350'}, `juicity://${uuid}:pw@example.com:443?mtu=1350#hk-01`],
++  ['nowhere defaults', 'nowhere', {nowhereKey}, `nowhere://${nowhereKey}@example.com:443#hk-01`]
+ ];
+ 
+ describe('nodeLink', () => {
+@@ -151,6 +153,34 @@
+     expect(new Set(links.map(row => row[1]))).toEqual(new Set(protocols));
+   });
+ 
++  it('builds a Nowhere QUIC link and retains its parameters when editing', () => {
++    const pin = 'ab'.repeat(32);
++    const fields = node('nowhere', {host: '2001:db8::1', nowhereKey, net: 'udp', morph: '0', sni: 'server.example', pin, name: '港 + &'});
++    const link = manualLink(fields);
++    expect(link).toBe(`nowhere://${nowhereKey}@[2001:db8::1]:443?net=udp&morph=0&sni=server.example&pin=${pin}#%E6%B8%AF%20%2B%20%26`);
++    const parsed = parseNodeLink(link);
++    expect(parsed.fields).toEqual(fields);
++    expect(nodeLink(parsed.fields, parsed.document)).toBe(link);
++    const edited = nodeLink({...parsed.fields, morph: '1', pin: ''}, parsed.document);
++    expect(parseNodeLink(edited).fields).toEqual({...fields, morph: '1', pin: ''});
++    expect(edited).not.toMatch(/morph=|pin=/);
++  });
++
++  it.each([
++    ['host', '::1]/foo'],
++    ['host', 'bad_name.example'],
++    ['port', '0x123'],
++    ['nowhereKey', nowhereKey.toUpperCase()],
++    ['nowhereKey', ''],
++    ['net', 'quic'],
++    ['sni', '-server.example'],
++    ['pin', 'ab'.repeat(31)]
++  ])('refuses malformed Nowhere %s %s', (key, value) => {
++    const fields = node('nowhere', {nowhereKey, [key]: value});
++    expect(manualInvalid(fields)).toEqual([key]);
++    expect(manualLink(fields)).toBe('');
++  });
++
+   it.each([
+     ['auto', 'none'],
+     ['auto', 'tls'],
+--- a/src/features/nodes/ManualFields.tsx
++++ b/src/features/nodes/ManualFields.tsx
+@@ -14,6 +14,9 @@
+   pbk: 'nodes.manual.publicKey',
+   sid: 'nodes.manual.shortId',
+   type: 'nodes.manual.transport',
++  net: 'nodes.manual.transport',
++  nowhereKey: 'nodes.manual.nowhereKey',
++  pin: 'nodes.manual.nowherePin',
+   transportHost: 'nodes.xhttp.host',
+   path: 'nodes.xhttp.path',
+   mode: 'nodes.xhttp.mode',
+@@ -23,7 +26,7 @@
+   congestion_control: 'nodes.manual.congestion'
+ };
+ // Protocol terms and option names that honk's links spell out stay as they are: a field without a label here is named by its key.
+-const terms: Record<string, string> = {alpn: 'ALPN', spx: 'SpiderX', ech_config: 'ECH config'};
++const terms: Record<string, string> = {alpn: 'ALPN', spx: 'SpiderX', ech_config: 'ECH config', morph: 'Morph'};
+ 
+ // The manual tab of the add dialog: the fields manualFields lists for the chosen protocol, and the link they make.
+ export function ManualFields({
+@@ -45,20 +48,26 @@
+   const invalid = manualInvalid(draft);
+   const choice = (id: string) => ({id, label: id === '' ? t('ui.none') : id});
+   const advanced = advancedFields(draft);
+-  const field = ({key, options, flag, required, range}: ManualField) => {
++  const field = ({key, options, flag, off, required, range}: ManualField) => {
+     const uuid = key === 'username' && draft.protocol !== 'socks5';
+     const label = labels[uuid ? 'uuid' : key] ? t(labels[uuid ? 'uuid' : key]) : (terms[key] ?? key);
+     return options ? (
+       <LabeledSelect
+         key={key}
+         label={label}
+-        items={options.map(choice)}
++        items={options.map(id => (key === 'net' ? {id, label: id === 'udp' ? 'UDP (QUIC)' : 'TCP'} : choice(id)))}
+         value={draft[key] ?? options[0]}
+         isDisabled={isDisabled}
+         onChange={value => onChange(key, value)}
+       />
+     ) : flag ? (
+-      <Checkbox key={key} label={label} isSelected={!!draft[key]} isDisabled={isDisabled} onChange={on => onChange(key, on ? flag : '')} />
++      <Checkbox
++        key={key}
++        label={label}
++        isSelected={off === undefined ? !!draft[key] : draft[key] === flag}
++        isDisabled={isDisabled}
++        onChange={on => onChange(key, on ? flag : (off ?? ''))}
++      />
+     ) : range ? (
+       <NumberField
+         key={key}
+@@ -79,6 +88,7 @@
+         isDisabled={isDisabled}
+         label={label}
+         value={draft[key] ?? ''}
++        type={key === 'nowhereKey' ? 'password' : undefined}
+         spellCheck={false}
+         error={draft[key] && invalid.includes(key) ? t(uuid ? 'nodes.manual.uuidInvalid' : 'nodes.manual.valueInvalid') : undefined}
+         onChange={value => onChange(key, value)}
+--- a/src/i18n/locales/en.json
++++ b/src/i18n/locales/en.json
+@@ -1087,6 +1087,8 @@
+   "nodes.manual.insecure": "Skip TLS certificate verification",
+   "nodes.manual.link": "Link",
+   "nodes.manual.method": "Encryption method",
++  "nodes.manual.nowhereKey": "Shared key (32 lowercase hex digits)",
++  "nodes.manual.nowherePin": "Certificate SHA-256 pin (64 lowercase hex digits)",
+   "nodes.manual.obfs": "Obfuscation",
+   "nodes.manual.obfsPassword": "Obfuscation password",
+   "nodes.manual.port": "Port",
+--- a/src/i18n/locales/zh-CN.json
++++ b/src/i18n/locales/zh-CN.json
+@@ -940,6 +940,8 @@
+   "nodes.manual.insecure": "跳过 TLS 证书验证",
+   "nodes.manual.link": "链接",
+   "nodes.manual.method": "加密方式",
++  "nodes.manual.nowhereKey": "共享密钥（32 位小写十六进制）",
++  "nodes.manual.nowherePin": "证书 SHA-256 指纹（64 位小写十六进制）",
+   "nodes.manual.obfs": "混淆",
+   "nodes.manual.obfsPassword": "混淆密码",
+   "nodes.manual.port": "端口",
+--- a/src/i18n/locales/zh-TW.json
++++ b/src/i18n/locales/zh-TW.json
+@@ -940,6 +940,8 @@
+   "nodes.manual.insecure": "略過 TLS 憑證驗證",
+   "nodes.manual.link": "連結",
+   "nodes.manual.method": "加密方式",
++  "nodes.manual.nowhereKey": "共享金鑰（32 位小寫十六進位）",
++  "nodes.manual.nowherePin": "憑證 SHA-256 指紋（64 位小寫十六進位）",
+   "nodes.manual.obfs": "混淆",
+   "nodes.manual.obfsPassword": "混淆密碼",
+   "nodes.manual.port": "連接埠",
+--- a/apps/lite/src/NodeForm.tsx
++++ b/apps/lite/src/NodeForm.tsx
+@@ -82,7 +82,8 @@
+     setState({...state, fields});
+     const complete = fields.host && fields.port && (fields.username || fields.password || fields.protocol === 'socks5');
+     const incomplete = manualInvalid(fields).some(key => !['host', 'port', 'username', 'password'].includes(key));
+-    change(complete && !incomplete ? nodeLink(fields, state.document) : '');
++    const valid = fields.protocol === 'nowhere' ? manualInvalid(fields).length === 0 : complete && !incomplete;
++    change(valid ? nodeLink(fields, state.document) : '');
+   };
+   const pluginOptions = (f['plugin-opts'] ?? '').split(';').filter(Boolean);
+   const pluginValue = (key: string) => pluginOptions.find(item => item.split('=')[0] === key)?.slice(key.length + 1) ?? '';
+@@ -95,13 +96,16 @@
+     host: t.nodeGuideHost,
+     username: t.nodeGuideCredentials,
+     password: t.nodeGuideCredentials,
++    nowhereKey: t.nodeGuideCredentials,
+     method: t.nodeGuideMethod,
+     security: t.nodeGuideSecurity,
+     type: t.nodeGuideType,
++    net: t.nodeGuideType,
+     sni: t.nodeGuideSni,
+     alpn: t.nodeGuideAlpn,
+     insecure: t.nodeGuideInsecure,
+     pinSHA256: t.nodeGuidePin,
++    pin: t.nodeGuidePin,
+     ech_config: t.nodeGuideEch,
+     pbk: t.nodeGuidePublicKey,
+     sid: t.nodeGuideShortId,
+@@ -148,7 +152,11 @@
+       </Text>
+     </VStack>
+   );
+-  const text = (key: string, label = key) => guide(key, <TextInput label={label} value={f[key] ?? ''} onChange={v => update(key, v)} isDisabled={disabled} />);
++  const text = (key: string, label = key) =>
++    guide(
++      key,
++      <TextInput label={label} value={f[key] ?? ''} type={key === 'nowhereKey' ? 'password' : undefined} onChange={v => update(key, v)} isDisabled={disabled} />
++    );
+   const choice = (key: string, options: string[], label = key) =>
+     guide(
+       key,
+@@ -156,7 +164,7 @@
+         key={key}
+         label={label}
+         value={f[key] ?? options[0]}
+-        options={options.map(value => ({value, label: value || t.none}))}
++        options={options.map(value => ({value, label: key === 'net' ? (value === 'udp' ? 'UDP (QUIC)' : 'TCP') : value || t.none}))}
+         onChange={v => update(key, v)}
+         isDisabled={disabled}
+       />
+@@ -228,7 +236,8 @@
+                 />
+               )}
+               {['vmess', 'vless', 'tuic', 'juicity', 'socks5'].includes(f.protocol) && text('username', f.protocol === 'socks5' ? t.username : 'UUID')}
+-              {!['vmess', 'vless'].includes(f.protocol) && text('password', t.password)}
++              {!['vmess', 'vless', 'nowhere'].includes(f.protocol) && text('password', t.password)}
++              {f.protocol === 'nowhere' && text('nowhereKey', t.nowhereKey)}
+             </Grid>
+           </VStack>
+         </Card>
+@@ -288,6 +297,12 @@
+                   )}
+                   {f.protocol === 'vmess' && choice('method', vmessMethods, t.cipher)}
+                   {security && choice('security', security, t.security)}
++                  {f.protocol === 'nowhere' && (
++                    <>
++                      {choice('net', ['tcp', 'udp'], t.transport)}
++                      {flag('morph', 'Morph')}
++                    </>
++                  )}
+                   {usesTls(f) && text('sni', 'SNI')}
+                   {f.security === 'reality' && (
+                     <>
+@@ -331,12 +346,18 @@
+                   </Text>
+                   {advanced && (
+                     <Grid xstyle={editorLayout.members}>
+-                      {usesTls(f) && !state.document?.json && flag('insecure', t.skipVerify)}
++                      {usesTls(f) && f.protocol !== 'nowhere' && !state.document?.json && flag('insecure', t.skipVerify)}
+                       {flow && choice('flow', flow.options!)}
+                       {advancedFields(f)
+                         .filter(({key}) => !state.document?.json || !['pinSHA256', 'ech_config'].includes(key))
+                         .map(({key, options, flag: on, range}) =>
+-                          options ? choice(key, options) : on ? flag(key, key, on) : range ? number(key, range) : text(key, key === 'alpn' ? 'ALPN' : key)
++                          options
++                            ? choice(key, options)
++                            : on
++                              ? flag(key, key, on)
++                              : range
++                                ? number(key, range)
++                                : text(key, key === 'alpn' ? 'ALPN' : key === 'pin' ? t.nowherePin : key)
+                         )}
+                     </Grid>
+                   )}
+--- a/apps/lite/src/i18n/en.ts
++++ b/apps/lite/src/i18n/en.ts
+@@ -698,6 +698,8 @@
+   intervalMinute: 'minute',
+   intervalSecond: 'second',
+   nodeGuideConnection: 'Connection',
++  nowhereKey: 'Shared key (32 lowercase hex digits)',
++  nowherePin: 'Certificate SHA-256 pin (64 lowercase hex digits)',
+   nodeGuideTransport: 'Transport and TLS',
+   nodeGuideAdvanced: 'Advanced',
+   nodeGuideAdvancedHelp: 'Optional tuning. Leave fields empty to keep the protocol defaults.',
+--- a/apps/lite/src/i18n/zh-CN.ts
++++ b/apps/lite/src/i18n/zh-CN.ts
+@@ -698,6 +698,8 @@
+   intervalMinute: '分钟',
+   intervalSecond: '秒',
+   nodeGuideConnection: '连接',
++  nowhereKey: '共享密钥（32 位小写十六进制）',
++  nowherePin: '证书 SHA-256 指纹（64 位小写十六进制）',
+   nodeGuideTransport: '传输与 TLS',
+   nodeGuideAdvanced: '高级',
+   nodeGuideAdvancedHelp: '可选调优。留空以使用协议默认值。',
+--- a/apps/lite/src/i18n/zh-TW.ts
++++ b/apps/lite/src/i18n/zh-TW.ts
+@@ -698,6 +698,8 @@
+   intervalMinute: '分鐘',
+   intervalSecond: '秒',
+   nodeGuideConnection: '連線',
++  nowhereKey: '共享金鑰（32 位小寫十六進位）',
++  nowherePin: '憑證 SHA-256 指紋（64 位小寫十六進位）',
+   nodeGuideTransport: '傳輸與 TLS',
+   nodeGuideAdvanced: '進階',
+   nodeGuideAdvancedHelp: '選用調整。留空以使用協定預設值。',
