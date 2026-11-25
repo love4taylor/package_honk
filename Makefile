@@ -37,23 +37,23 @@ PKG_DIR:=$(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=honk
-PKG_SOURCE_DATE:=2026-11-20
-PKG_SOURCE_VERSION:=817bdf28b814fbcab7a947bc30826d2d46652f08
-PKG_VERSION:=0.1.0_beta6_p$(subst -,,$(PKG_SOURCE_DATE))
+PKG_SOURCE_DATE:=2026-11-25
+PKG_SOURCE_VERSION:=8654c03997692bafbe03ab89c839928a2c723523
+PKG_VERSION:=0.1.0_beta7_p$(subst -,,$(PKG_SOURCE_DATE))
 PKG_RELEASE:=1
 
 PKG_SOURCE_SUBDIR:=honk-$(PKG_SOURCE_VERSION)
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_SOURCE_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/love4taylor/honk/tar.gz/$(PKG_SOURCE_VERSION)?
-PKG_HASH:=b4a9184f7cba2be0c2f40196845ab4989ba1937d34474006656d5fb98df426bc
+PKG_HASH:=c2d21ae127743acb3afca3a4bae66fa566739396f9d265ce19f6e17bd59f378e
 
 # Keep this revision aligned with DOONA_REVISION in Honk's .github/ci/pins.env.
-DOONA_REVISION:=4c1f6f3fc1523558d595c363ba677494844030e3
+DOONA_REVISION:=4e8d50407298bb71338181607ea3f6ede5689124
 DOONA_SOURCE:=doona-$(DOONA_REVISION).tar.gz
 
 # build.rs accepts its version label through GITHUB_REF. This identifies a
 # branch snapshot; it does not assert that the repository contains such a tag.
-HONK_BUILD_VERSION:=v0.1.0-beta.6-nw-$(PKG_SOURCE_VERSION)
+HONK_BUILD_VERSION:=v0.1.0-beta.7-nw-$(PKG_SOURCE_VERSION)
 
 PKG_LICENSE:=GPL-3.0-only
 PKG_LICENSE_FILES:=LICENSE
@@ -64,7 +64,7 @@ include $(INCLUDE_DIR)/package.mk
 define Download/doona
   FILE:=$(DOONA_SOURCE)
   URL:=https://codeload.github.com/Zakkaus/doona/tar.gz/$(DOONA_REVISION)?
-  HASH:=2c6783763919c1d30c0a49b058a9baf9d1e58cc2f94af864d87b5a2a27f5fce7
+  HASH:=2015dcce55bd7fa407a75a3b1fe2ce0a2900d9504fc552090b453704c4dffb13
 endef
 
 define Package/honk

@@ -32,7 +32,7 @@
  export const protocolName = (protocol: Protocol) => protocolNames[protocol] ?? protocol.toUpperCase();
  export type NodeFields = Record<string, string> & {protocol: Protocol; host: string; port: string; username: string; password: string; name: string};
  export type NodeDocument = {original: string; initial: NodeFields; query: string; json?: Record<string, unknown>; tail: string};
-@@ -16,11 +16,14 @@
+@@ -16,11 +16,25 @@
      username: '',
      password: '',
      name: '',
@@ -44,12 +44,23 @@
 +    ...(protocol === 'nowhere' ? {nowhereKey: '', ...nowhereDefaults} : {})
    };
  }
-+const nowhereDefaults = {net: 'tcp', morph: '1', sni: '', pin: ''};
-+const nowhereParams = (query: string) => new URLSearchParams(query.replaceAll('+', '%2B'));
++export const nowhereCiphers = ['chacha', 'aes'];
++const nowhereDefaults = {net: 'tcp', morph: '1', cipher: nowhereCiphers[0], sni: '', pin: ''};
++function nowhereParams(query: string) {
++  const params = new URLSearchParams(query.replaceAll('+', '%2B'));
++  // Honk recognizes only the literal cipher key, while URLSearchParams also decodes its name.
++  params.delete('cipher');
++  for (const pair of query.split('&')) {
++    if (pair.split('=', 1)[0] === 'cipher') {
++      params.append('cipher', new URLSearchParams(pair.replaceAll('+', '%2B')).get('cipher')!);
++    }
++  }
++  return params;
++}
  const aliases: Record<string, string[]> = {
    sni: ['sni', 'peer'],
    'plugin-opts': ['plugin-opts', 'plugin_opts'],
-@@ -56,8 +59,11 @@
+@@ -56,8 +70,11 @@
    if (!protocols.includes(protocol as Protocol)) throw new Error('Unsupported protocol');
    const fields = emptyNode(protocol as Protocol);
    let body = first.slice(first.indexOf('://') + 3);
@@ -63,7 +74,7 @@
    if (hash >= 0) body = body.slice(0, hash);
    const q = body.indexOf('?');
    const query = q < 0 ? '' : body.slice(q + 1);
-@@ -91,7 +97,17 @@
+@@ -91,7 +108,17 @@
      rawCredentials = protocol === 'ss';
      encodedAuthority = true;
    }
@@ -82,13 +93,17 @@
      const at = authority.lastIndexOf('@');
      const endpoint = authority.slice(at + 1).split('/')[0];
      let credentials = at < 0 ? '' : authority.slice(0, at);
-@@ -188,6 +204,18 @@
+@@ -188,6 +215,22 @@
  export function nodeLink(fields: NodeFields, document?: NodeDocument): string {
    if (document && JSON.stringify(fields) === JSON.stringify(document.initial)) return document.original;
    const same = document?.initial.protocol === fields.protocol;
 +  if (fields.protocol === 'nowhere') {
 +    const params = nowhereParams(same ? document.query : '');
 +    for (const [key, fallback] of Object.entries(nowhereDefaults)) {
++      if (key === 'cipher' && fields.morph === '0') {
++        params.delete(key);
++        continue;
++      }
 +      if (same && document.initial[key] === fields[key]) continue;
 +      params.delete(key);
 +      if (fields[key] && fields[key] !== fallback) params.set(key, fields[key]);
@@ -101,7 +116,7 @@
    if (fields.protocol === 'vmess' && document?.json && same) {
      const json: Record<string, unknown> = same && document?.json ? {...document.json} : {v: '2', aid: '0'};
      for (const [key, target] of Object.entries(jsonKeys)) {
-@@ -240,7 +268,7 @@
+@@ -240,7 +283,7 @@
    return `${fields.protocol}://${authority}${params.size ? `?${params}` : ''}${fields.name ? `#${enc(fields.name)}` : ''}${same ? (document?.tail ?? '') : ''}`;
  }
  // `flag` is the value a ticked checkbox writes; `range` bounds a whole number.
@@ -110,17 +125,23 @@
  const uuidProtocols = ['vmess', 'vless', 'tuic', 'juicity'];
  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
  export const shadowsocksMethods = [
-@@ -272,6 +300,9 @@
+@@ -272,6 +315,15 @@
  // cipher, security, TLS, transport and protocol options apply to this protocol and choice. Lite's form reads the same lists.
  export function manualFields(f: NodeFields): ManualField[] {
    const p = f.protocol;
 +  if (p === 'nowhere') {
-+    return [{key: 'nowhereKey', required: true}, {key: 'net', options: ['tcp', 'udp']}, {key: 'morph', flag: '1', off: '0'}, {key: 'sni'}];
++    return [
++      {key: 'nowhereKey', required: true},
++      {key: 'net', options: ['tcp', 'udp']},
++      {key: 'morph', flag: '1', off: '0'},
++      ...(f.morph === '1' ? [{key: 'cipher', options: nowhereCiphers}] : []),
++      {key: 'sni'}
++    ];
 +  }
    const fields: ManualField[] = [];
    const add = (key: string, more: Omit<ManualField, 'key'> = {}) => fields.push({key, ...more});
    if (['vmess', 'vless', 'tuic', 'juicity', 'socks5'].includes(p)) add('username', {required: p !== 'socks5'});
-@@ -311,6 +342,7 @@
+@@ -311,6 +363,7 @@
  // reads it: ALPN for TUIC and XHTTP, the QUIC and AnyTLS tuning for their own protocols, and the mux controls for VLESS.
  export function advancedFields(f: NodeFields): ManualField[] {
    const p = f.protocol;
@@ -128,7 +149,7 @@
    const fields: ManualField[] = [];
    const add = (key: string, more: Omit<ManualField, 'key'> = {}) => fields.push({key, ...more});
    const count = (key: string, range: [number, number] = [0, Number.MAX_SAFE_INTEGER], required = false) => add(key, {range, required});
-@@ -388,9 +420,33 @@
+@@ -388,9 +441,34 @@
    if (key === 'alpn') return f.type === 'xhttp' && value.split(',').some(item => item.trim() && item.trim() !== 'h2');
    return key === 'mport' && !hopsValid(value);
  }
@@ -155,6 +176,7 @@
 +      ...(/^[a-f0-9]{32}$/.test(f.nowhereKey) ? [] : ['nowhereKey']),
 +      ...(['tcp', 'udp'].includes(f.net) ? [] : ['net']),
 +      ...(['0', '1'].includes(f.morph) ? [] : ['morph']),
++      ...(f.morph === '0' || nowhereCiphers.includes(f.cipher) ? [] : ['cipher']),
 +      ...(!f.sni || nowhereDomain(f.sni) ? [] : ['sni']),
 +      ...(!f.pin || /^[a-f0-9]{64}$/.test(f.pin) ? [] : ['pin'])
 +    ];
@@ -182,7 +204,7 @@
  ];
  
  describe('nodeLink', () => {
-@@ -151,6 +153,34 @@
+@@ -151,6 +153,54 @@
      expect(new Set(links.map(row => row[1]))).toEqual(new Set(protocols));
    });
  
@@ -199,6 +221,25 @@
 +    expect(edited).not.toMatch(/morph=|pin=/);
 +  });
 +
++  it('selects and retains the Nowhere Morph cipher when editing a link', () => {
++    const fields = node('nowhere', {nowhereKey, cipher: 'aes', net: 'udp'});
++    const link = manualLink(fields);
++    expect(link).toBe(`nowhere://${nowhereKey}@example.com:443?net=udp&cipher=aes#hk-01`);
++    const {document, fields: parsed} = parseNodeLink(link);
++    expect(parsed).toEqual(fields);
++    expect(nodeLink({...parsed, name: 'renamed'}, document)).toBe(link.replace('#hk-01', '#renamed'));
++    expect(nodeLink({...parsed, cipher: 'chacha'}, document)).toBe(link.replace('&cipher=aes', ''));
++    expect(nodeLink({...parsed, morph: '0'}, document)).toBe(link.replace('cipher=aes', 'morph=0'));
++  });
++
++  it('ignores an encoded Nowhere cipher key like Honk does', () => {
++    const original = `nowhere://${nowhereKey}@example.com:443?%63ipher=aes#hk-01`;
++    const {document, fields} = parseNodeLink(original);
++    expect(fields.cipher).toBe('chacha');
++    expect(nodeLink(fields, document)).toBe(original);
++    expect(nodeLink({...fields, name: 'renamed'}, document)).toBe(`nowhere://${nowhereKey}@example.com:443#renamed`);
++  });
++
 +  it.each([
 +    ['host', '::1]/foo'],
 +    ['host', 'bad_name.example'],
@@ -206,6 +247,7 @@
 +    ['nowhereKey', nowhereKey.toUpperCase()],
 +    ['nowhereKey', ''],
 +    ['net', 'quic'],
++    ['cipher', 'aes-256'],
 +    ['sni', '-server.example'],
 +    ['pin', 'ab'.repeat(31)]
 +  ])('refuses malformed Nowhere %s %s', (key, value) => {
@@ -219,7 +261,14 @@
      ['auto', 'tls'],
 --- a/src/features/nodes/ManualFields.tsx
 +++ b/src/features/nodes/ManualFields.tsx
-@@ -14,6 +14,9 @@
+@@ -8,12 +8,16 @@
+   flow: 'nodes.manual.flow',
+   password: 'login.password',
+   method: 'nodes.manual.method',
++  cipher: 'nodes.manual.method',
+   security: 'nodes.manual.security',
+   sni: 'nodes.manual.sni',
+   insecure: 'nodes.manual.insecure',
    pbk: 'nodes.manual.publicKey',
    sid: 'nodes.manual.shortId',
    type: 'nodes.manual.transport',
@@ -229,7 +278,7 @@
    transportHost: 'nodes.xhttp.host',
    path: 'nodes.xhttp.path',
    mode: 'nodes.xhttp.mode',
-@@ -23,7 +26,7 @@
+@@ -23,7 +27,7 @@
    congestion_control: 'nodes.manual.congestion'
  };
  // Protocol terms and option names that honk's links spell out stay as they are: a field without a label here is named by its key.
@@ -238,7 +287,7 @@
  
  // The manual tab of the add dialog: the fields manualFields lists for the chosen protocol, and the link they make.
  export function ManualFields({
-@@ -45,20 +48,26 @@
+@@ -45,20 +49,26 @@
    const invalid = manualInvalid(draft);
    const choice = (id: string) => ({id, label: id === '' ? t('ui.none') : id});
    const advanced = advancedFields(draft);
@@ -268,7 +317,7 @@
      ) : range ? (
        <NumberField
          key={key}
-@@ -79,6 +88,7 @@
+@@ -79,6 +89,7 @@
          isDisabled={isDisabled}
          label={label}
          value={draft[key] ?? ''}
@@ -311,7 +360,15 @@
    "nodes.manual.port": "連接埠",
 --- a/apps/lite/src/NodeForm.tsx
 +++ b/apps/lite/src/NodeForm.tsx
-@@ -82,7 +82,8 @@
+@@ -17,6 +17,7 @@
+   manualFields,
+   manualInvalid,
+   nodeLink,
++  nowhereCiphers,
+   obfsTypes,
+   parseNodeLink,
+   protocolName,
+@@ -82,7 +83,8 @@
      setState({...state, fields});
      const complete = fields.host && fields.port && (fields.username || fields.password || fields.protocol === 'socks5');
      const incomplete = manualInvalid(fields).some(key => !['host', 'port', 'username', 'password'].includes(key));
@@ -321,7 +378,7 @@
    };
    const pluginOptions = (f['plugin-opts'] ?? '').split(';').filter(Boolean);
    const pluginValue = (key: string) => pluginOptions.find(item => item.split('=')[0] === key)?.slice(key.length + 1) ?? '';
-@@ -95,13 +96,16 @@
+@@ -95,13 +97,16 @@
      host: t.nodeGuideHost,
      username: t.nodeGuideCredentials,
      password: t.nodeGuideCredentials,
@@ -338,7 +395,7 @@
      ech_config: t.nodeGuideEch,
      pbk: t.nodeGuidePublicKey,
      sid: t.nodeGuideShortId,
-@@ -148,7 +152,11 @@
+@@ -148,7 +153,11 @@
        </Text>
      </VStack>
    );
@@ -351,7 +408,7 @@
    const choice = (key: string, options: string[], label = key) =>
      guide(
        key,
-@@ -156,7 +164,7 @@
+@@ -156,7 +165,7 @@
          key={key}
          label={label}
          value={f[key] ?? options[0]}
@@ -360,7 +417,7 @@
          onChange={v => update(key, v)}
          isDisabled={disabled}
        />
-@@ -228,7 +236,8 @@
+@@ -228,7 +237,8 @@
                  />
                )}
                {['vmess', 'vless', 'tuic', 'juicity', 'socks5'].includes(f.protocol) && text('username', f.protocol === 'socks5' ? t.username : 'UUID')}
@@ -370,7 +427,7 @@
              </Grid>
            </VStack>
          </Card>
-@@ -288,6 +297,12 @@
+@@ -288,6 +298,13 @@
                    )}
                    {f.protocol === 'vmess' && choice('method', vmessMethods, t.cipher)}
                    {security && choice('security', security, t.security)}
@@ -378,12 +435,13 @@
 +                    <>
 +                      {choice('net', ['tcp', 'udp'], t.transport)}
 +                      {flag('morph', 'Morph')}
++                      {f.morph === '1' && choice('cipher', nowhereCiphers, t.cipher)}
 +                    </>
 +                  )}
                    {usesTls(f) && text('sni', 'SNI')}
                    {f.security === 'reality' && (
                      <>
-@@ -331,12 +346,18 @@
+@@ -331,12 +348,18 @@
                    </Text>
                    {advanced && (
                      <Grid xstyle={editorLayout.members}>
